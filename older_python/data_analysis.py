@@ -83,7 +83,7 @@ def summarize(df):
         float_format="%.3f"
     )
 
-    with open("numeric_summary_stats.tex", "w") as f:
+    with open("../numeric_summary_stats.tex", "w") as f:
         f.write(num_latex)
 
 
@@ -94,7 +94,7 @@ def summarize(df):
         label="tab:categorical_summary_stats"
     )
 
-    with open("categorical_summary_stats.tex", "w") as f:
+    with open("../categorical_summary_stats.tex", "w") as f:
         f.write(cat_latex)
 
 def explore_chauvenet_vs_lof(df):
@@ -133,6 +133,6 @@ def explore_chauvenet_vs_lof(df):
     plot_xyz_outliers_over_time(df_chau, "Chauvenet", "chau_outlier_xyz")
 
 if __name__ == "__main__":
-    df_merged = pd.read_csv("data/merged_df.csv")
+    df_merged = pd.read_csv("../data/merged_df.csv")
     explore_chauvenet_vs_lof(df_merged)
     summarize(df_merged)

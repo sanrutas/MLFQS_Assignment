@@ -111,9 +111,14 @@ def low_pass_smoothing(df, cutoff_frequency=5):
 
 
 if __name__ == "__main__":
-    df = pd.read_csv("data/merged_df.csv")
+    df = pd.read_csv("../data/merged_df.csv")
     df = detect_outliers(df)
     df = interpolate_outliers(df)
     df = low_pass_smoothing(df).drop("row_id")
+
+    df = df[["time", "subject", "exercise", "set_nr", "focus", "hr", *[col for col in df.columns if col.endswith("lowpass")]]]
+    df["set_id"] = (
+        df.groupby(["subject", "exercise", "set_nr", "focus"]).ngroup()
+    )
 
     df.to_csv("data/df_processed.csv", index=False)

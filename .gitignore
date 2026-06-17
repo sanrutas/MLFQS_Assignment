@@ -1,11 +1,11 @@
 .venv
-raw
-preproc
+data/raw
+data/preproc
 .idea
 dev2.ipynb
 lectures
 assignment.pdf
-df_outliers_lof.csv
+data/df_outliers_lof.csv
 data/featured_df.csv
 dev3.ipynb
 .pdf
