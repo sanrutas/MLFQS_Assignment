@@ -27,11 +27,19 @@ STABLE = {
 
 PARAMS = {**STABLE, **LSTM_TUNABLE_PARAMS}
 
+# metric_name -> callable(y_true, y_pred); used by metrics + importance
+_METRIC_FNS = {
+    "accuracy": accuracy_score,
+    "balanced_accuracy": balanced_accuracy_score,
+    "precision": lambda yt, yp: precision_score(yt, yp, zero_division=0),
+    "recall": lambda yt, yp: recall_score(yt, yp, zero_division=0),
+    "f1": lambda yt, yp: f1_score(yt, yp, zero_division=0),
+}
+METRIC_COLS = ["accuracy", "balanced_accuracy", "precision", "recall", "f1"]
+
 
 # --------------------------------------------------------------------------- #
 # 1.  Build OVERLAPPING WINDOWS instead of one giant 1500-step sequence.
-#     Each window keeps its parent set's label; predictions are aggregated
-#     back to the set at inference time.
 # --------------------------------------------------------------------------- #
 def make_windows(df, p):
     sensor_cols = [c for c in df.columns if c not in RECORD_COLS + ["time"]]
@@ -60,8 +68,7 @@ def make_windows(df, p):
 
 
 # --------------------------------------------------------------------------- #
-# 2.  Your splitting procedure, unchanged: test = 1 focused + 1 unfocused
-#     per subject (4 sets), the rest train.
+# 2.  Your splitting procedure, unchanged.
 # --------------------------------------------------------------------------- #
 def get_splits(records, random_state=42, max_splits=9999):
     groups = []
@@ -76,8 +83,7 @@ def get_splits(records, random_state=42, max_splits=9999):
 
 
 # --------------------------------------------------------------------------- #
-# 3.  Plain LSTM. Pooling over all timesteps (default) keeps the one change
-#     that actually fixed the original model, without any conv/GRU machinery.
+# 3.  Plain LSTM.
 # --------------------------------------------------------------------------- #
 class LSTMClassifier(nn.Module):
     def __init__(self, n_sensors, n_exercise, p):
@@ -128,7 +134,7 @@ def train_model(Xw, ex_oh, yw, n_sensors, p, device):
     model = LSTMClassifier(n_sensors, ex_oh.shape[1], p).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=p["lr"], weight_decay=p["weight_decay"])
 
-    pos = yw.sum();
+    pos = yw.sum()
     neg = len(yw) - pos  # class weighting for window imbalance
     pos_weight = torch.tensor([neg / max(pos, 1)], dtype=torch.float32, device=device)
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -183,7 +189,7 @@ def run_single_split(Xw, win_rec, win_ex, records, y_rec, test_idx,
 
 def main(df, params=None):
     p = dict(PARAMS if params is None else params)  # copy so tuning callers don't mutate
-    torch.manual_seed(p["seed"]);
+    torch.manual_seed(p["seed"])
     np.random.seed(p["seed"])
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -202,7 +208,7 @@ def main(df, params=None):
             print(f"  split {r}/{len(splits)}")
         res, pr = run_single_split(Xw, win_rec, win_ex, records, y_rec, ti,
                                    n_sensors, n_exercise, p, device)
-        results.append(res);
+        results.append(res)
         preds.extend(pr)
 
     res_df = pd.DataFrame(results)
@@ -214,11 +220,9 @@ def main(df, params=None):
 
 
 def eval_over_splits(df, p, splits, cache=None, metric="balanced_accuracy"):
-    """Average `metric` over the given splits for one LSTM config.
-    Returns (mean, std). `cache` (a dict) reuses windowed arrays across configs
-    that share window/stride/decim. Used by the tuning harness."""
+    """Average `metric` over the given splits for one LSTM config (for tuning)."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch.manual_seed(p["seed"]);
+    torch.manual_seed(p["seed"])
     np.random.seed(p["seed"])
 
     cache = {} if cache is None else cache
@@ -234,6 +238,175 @@ def eval_over_splits(df, p, splits, cache=None, metric="balanced_accuracy"):
                                n_sensors, n_exercise, p, device)[0][metric]
               for ti in splits]
     return float(np.mean(scores)), float(np.std(scores))
+
+
+def _aggregate(probs, te_rec, y_rec):
+    set_prob = pd.Series(probs).groupby(te_rec).mean()
+    idx = set_prob.index.to_numpy()
+    set_pred = (set_prob.to_numpy() >= 0.5).astype(int)
+    return idx, set_pred, y_rec[idx].astype(int), set_prob.to_numpy()
+
+
+def run_single_split_rich(Xw, win_rec, win_ex, records, y_rec, test_idx,
+                          n_sensors, n_exercise, p, device,
+                          perm_repeats=5, imp_metric="balanced_accuracy", rng=None):
+    rng = np.random.default_rng(0) if rng is None else rng
+    train_recs = records.index.difference(test_idx).to_numpy()
+    tr = np.isin(win_rec, train_recs)
+    te = np.isin(win_rec, test_idx)
+
+    seq_len, n_feat = Xw.shape[1], Xw.shape[2]
+    scaler = StandardScaler().fit(Xw[tr].reshape(-1, n_feat))
+    Xtr = scaler.transform(Xw[tr].reshape(-1, n_feat)).reshape(-1, seq_len, n_feat).astype(np.float32)
+    Xte = scaler.transform(Xw[te].reshape(-1, n_feat)).reshape(-1, seq_len, n_feat).astype(np.float32)
+
+    eye = np.eye(n_exercise, dtype=np.float32)
+    ex_tr, ex_te = eye[win_ex[tr]], eye[win_ex[te]]
+    y_tr = y_rec[win_rec[tr]].astype(np.float32)
+    te_rec = win_rec[te]
+
+    model = train_model(Xtr, ex_tr, y_tr, n_sensors, p, device)
+    model.eval()
+    ex_te_t = torch.tensor(ex_te).to(device)
+
+    def predict(Xarr):
+        with torch.no_grad():
+            logits = model(torch.tensor(Xarr).to(device), ex_te_t)
+            return torch.sigmoid(logits).cpu().numpy()
+
+    probs = predict(Xte)
+    idx, set_pred, y_true, set_prob = _aggregate(probs, te_rec, y_rec)
+    result = {m: _METRIC_FNS[m](y_true, set_pred) for m in METRIC_COLS}
+    preds = list(zip(idx, y_true, set_pred, set_prob))
+
+    # ---- permutation importance (per sensor channel) ----
+    importance = np.zeros(n_feat, dtype=np.float64)
+    if perm_repeats > 0:
+        base = _METRIC_FNS[imp_metric](y_true, set_pred)
+        n_te = Xte.shape[0]
+        for c in range(n_feat):
+            drops = []
+            for _ in range(perm_repeats):
+                Xp = Xte.copy()
+                Xp[:, :, c] = Xte[rng.permutation(n_te), :, c]  # break channel<->label link
+                _, sp_pred, yt, _ = _aggregate(predict(Xp), te_rec, y_rec)
+                drops.append(base - _METRIC_FNS[imp_metric](yt, sp_pred))
+            importance[c] = float(np.mean(drops))
+
+    return result, preds, importance
+
+
+def evaluate_rich(df, params=None, perm_repeats=5, imp_metric="balanced_accuracy",
+                  output_dir="results/lstm"):
+    """Full evaluation. Returns (results_df, predictions_df, importance_df).
+
+    results_df     : one row per split, all five metrics.
+    predictions_df : one row per (set, split) with meta cols, pred, prob, correct.
+    importance_df  : one row per sensor channel, mean/std permutation importance.
+    Set perm_repeats=0 to skip importance (faster).
+    All outputs are saved to output_dir/ as CSVs + PNG.
+    """
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+
+    p = dict(PARAMS if params is None else params)
+    torch.manual_seed(p["seed"])
+    np.random.seed(p["seed"])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    records, sensor_cols, Xw, win_rec, win_ex = make_windows(df, p)
+    y_rec = records["focus"].to_numpy(dtype=np.float32)
+    n_exercise = int(win_ex.max()) + 1
+    n_sensors = Xw.shape[2]
+    rng = np.random.default_rng(p["seed"])
+
+    print(f"device={device}  sensors={n_sensors}  windows={Xw.shape}  "
+          f"importance={'on' if perm_repeats else 'off'}")
+
+    splits = get_splits(records, p["seed"], p["max_splits"])
+    results, preds, imp_per_split = [], [], []
+    for r, ti in enumerate(splits):
+        if r % 10 == 0:
+            print(f"  split {r}/{len(splits)}")
+        res, pr, imp = run_single_split_rich(
+            Xw, win_rec, win_ex, records, y_rec, ti,
+            n_sensors, n_exercise, p, device,
+            perm_repeats=perm_repeats, imp_metric=imp_metric, rng=rng)
+        results.append(res)
+        preds.extend(pr)
+        imp_per_split.append(imp)
+
+    results_df = pd.DataFrame(results)
+
+    predictions_df = pd.DataFrame(preds, columns=["record", "focus", "pred", "prob"])
+    predictions_df["correct"] = predictions_df["focus"] == predictions_df["pred"]
+    meta = records.reset_index().rename(columns={"index": "record"})
+    predictions_df = predictions_df.merge(
+        meta[["record", "set_id", "subject", "exercise", "set_nr"]],
+        on="record", how="left")
+
+    imp_mat = np.vstack(imp_per_split)  # (n_splits, n_feat)
+    importance_df = (pd.DataFrame({
+        "feature": sensor_cols,
+        "importance_mean": imp_mat.mean(axis=0),
+        "importance_std": imp_mat.std(axis=0),
+    }).sort_values("importance_mean", ascending=False).reset_index(drop=True))
+
+    # ---- save everything ----
+    results_df.to_csv(os.path.join(output_dir, "metrics.csv"), index=False)
+    predictions_df.to_csv(os.path.join(output_dir, "predictions.csv"), index=False)
+    importance_df.to_csv(os.path.join(output_dir, "importance.csv"), index=False)
+
+    summary = metrics_summary(results_df)
+    summary.to_csv(os.path.join(output_dir, "metrics_summary.csv"))
+
+    record_report = per_record_report(predictions_df)
+    record_report.to_csv(os.path.join(output_dir, "per_record_report.csv"))
+
+    plot_importance(importance_df, top=20,
+                    path=os.path.join(output_dir, "importance.png"))
+
+    print(f"\nall results saved to {output_dir}/")
+    return results_df, predictions_df, importance_df
+
+
+def metrics_summary(results_df):
+    summary = results_df[METRIC_COLS].describe()
+    print(summary.round(3))
+    print("\nmeans:", results_df[METRIC_COLS].mean().round(3).to_dict())
+    return summary
+
+
+def per_record_report(predictions_df):
+    report = (predictions_df
+              .groupby(RECORD_COLS)
+              .agg(count=("correct", "count"),
+                   hit_rate=("correct", "mean"),
+                   mean_prob=("prob", "mean"))
+              .sort_values("hit_rate"))
+    print(report.round(3))
+    return report
+
+
+def plot_importance(importance_df, top=20, path=None):
+
+    import matplotlib
+    if path is not None:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    d = importance_df.head(top).iloc[::-1]   # most important at top
+    fig, ax = plt.subplots(figsize=(8, max(3, 0.35 * len(d))))
+    ax.barh(d["feature"], d["importance_mean"], xerr=d["importance_std"],
+            color="#4C72B0", ecolor="#999", capsize=3)
+    ax.axvline(0, color="k", lw=0.8)
+    ax.set_xlabel("Permutation importance (drop in balanced accuracy)")
+    ax.set_title(f"LSTM feature importance (top {min(top, len(importance_df))})")
+    fig.tight_layout()
+    if path:
+        fig.savefig(path, dpi=130)
+        print("saved", path)
+    return fig
 
 
 def add_axis_combinations(df):
@@ -256,7 +429,6 @@ if __name__ == "__main__":
     df = pd.read_csv("data/df_processed.csv")
     df = add_axis_combinations(df)
 
-    results_df, predictions_df = main(df)  # uses PARAMS
-
-    print("\nPer-set hit-rate:")
-    print(predictions_df.groupby("record")["correct"].mean().sort_values())
+    results_df, predictions_df, importance_df = evaluate_rich(
+        df, perm_repeats=5, output_dir="results/lstm"
+    )

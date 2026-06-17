@@ -62,8 +62,6 @@ SVM_tune = ModelSpec("svm", config.SVM_SPACE, dict(SVM.DEFAULTS), SVM.eval_over_
 
 def run(df, spec, n_trials=40, n_tune=40, n_eval=40, split_seed=0,
         sampler_seed=0, metric="balanced_accuracy", verbose=True):
-    """Returns (study, tune_splits, eval_splits). Tuning uses tune_splits only;
-    eval_splits are held out for an honest final estimate."""
     tune_splits, eval_splits = partition_splits(df, n_tune, n_eval, split_seed)
     cache = {}                                   # shared -> windows/features reused
 
@@ -74,8 +72,7 @@ def run(df, spec, n_trials=40, n_tune=40, n_eval=40, split_seed=0,
         return mean
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction=spec.direction,
-                                sampler=optuna.samplers.TPESampler(seed=sampler_seed))
+    study = optuna.create_study(direction=spec.direction, sampler=optuna.samplers.TPESampler(seed=sampler_seed))
     if verbose:
         print(f"[{spec.name}] {n_trials} trials x {len(tune_splits)} tune splits "
               f"(TPE, metric={metric})")
