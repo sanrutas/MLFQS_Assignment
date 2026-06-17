@@ -432,7 +432,10 @@ if __name__ == "__main__":
     # drop uninformative/redundant features
     drop_cols = [
         "acc_x_lowpass", "acc_y_lowpass", "acc_z_lowpass",  # redundant with acc_lin
-        "Unnamed: 0",  # row index artifact
+        "Unnamed: 0",    # row index artifact
+        "acc_abs_sum", "acc_magnitude", "acc_pairwise_product_sum", # redundant with acc_lin
+        "orient_abs_sum", "orient_pairwise_product_sum", "orient_magnitude",  # redundant with yaw/pitch/roll
+
     ]
     df = df.drop(columns=[c for c in drop_cols if c in df.columns])
     
