@@ -428,7 +428,14 @@ def add_axis_combinations(df):
 if __name__ == "__main__":
     df = pd.read_csv("data/df_processed.csv")
     df = add_axis_combinations(df)
-
+    
+    # drop uninformative/redundant features
+    drop_cols = [
+        "acc_x_lowpass", "acc_y_lowpass", "acc_z_lowpass",  # redundant with acc_lin
+        "Unnamed: 0",  # row index artifact
+    ]
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns])
+    
     results_df, predictions_df, importance_df = evaluate_rich(
         df, perm_repeats=5, output_dir="results/lstm"
     )
