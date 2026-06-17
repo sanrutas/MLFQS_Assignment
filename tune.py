@@ -9,6 +9,7 @@ import optuna
 
 import LSTM_model as LSTM
 import SVM_model as SVM
+import RF_model as RF
 import config
 
 
@@ -58,7 +59,7 @@ class ModelSpec:
 
 LSTM_tune = ModelSpec("lstm", config.LSTM_SPACE, dict(LSTM.PARAMS), LSTM.eval_over_splits)
 SVM_tune = ModelSpec("svm", config.SVM_SPACE, dict(SVM.DEFAULTS), SVM.eval_over_splits)
-
+RF_tune = ModelSpec("rf", config.RF_SPACE, dict(RF.DEFAULTS), RF.eval_over_splits)
 
 def run(df, spec, n_trials=40, n_tune=40, n_eval=40, split_seed=0,
         sampler_seed=0, metric="balanced_accuracy", verbose=True):
@@ -112,7 +113,7 @@ def best_params(study, spec):
 if __name__ == "__main__":
     df = LSTM.add_axis_combinations(pd.read_csv("data/df_processed.csv"))
 
-    for spec in (LSTM_tune,):
+    for spec in (RF_tune,):
         study, tune_splits, eval_splits = run(
             df, spec, n_trials=30, n_tune=30, n_eval=30, split_seed=0,
         )

@@ -27,3 +27,10 @@ SVM_SPACE = {
     "C":     {"type": "float", "low": 1e-2, "high": 1e2, "log": True},
     "gamma": {"type": "float", "low": 1e-4, "high": 1e1, "log": True},
 }
+
+RF_SPACE = {
+    "n_estimators": {"type": "categorical", "choices": [50, 100, 200]},
+    "max_depth":    {"type": "categorical", "choices": [None, 10, 20, 30]},
+    "max_features": {"type": "categorical", "choices": ["sqrt", "log2", 0.3, 0.5]},
+    "min_samples_split": {"type": "int", "low": 2, "high": 10},
+}

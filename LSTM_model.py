@@ -21,7 +21,7 @@ STABLE = {
     "head_hidden": 64,
     "use_exercise": True,
     "batch_size": 32,
-    "max_splits": 50,
+    "max_splits": 1296,
     "seed": 42,
 }
 
