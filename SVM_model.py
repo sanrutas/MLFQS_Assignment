@@ -13,9 +13,20 @@ from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
 META_COLS = ["set_id", "subject", "exercise", "set_nr", "focus"]
 TARGET_COL = "focus"
 PARAMS = {
-    "gamma":"scale",
-    "C":1
+    "gamma":0.0036,
+    "C":84.328,
+    "n_repeats": 130,
 }
+
+# metric_name -> callable(y_true, y_pred); used by metrics + importance
+_METRIC_FNS = {
+    "accuracy": accuracy_score,
+    "balanced_accuracy": balanced_accuracy_score,
+    "precision": lambda yt, yp: precision_score(yt, yp, zero_division=0),
+    "recall": lambda yt, yp: recall_score(yt, yp, zero_division=0),
+    "f1": lambda yt, yp: f1_score(yt, yp, zero_division=0),
+}
+METRIC_COLS = ["accuracy", "balanced_accuracy", "precision", "recall", "f1"]
 
 
 def add_axis_combinations(g):
@@ -198,7 +209,7 @@ def run_single_split(data, test_idx, repeat, feature_cols, C=1.0, gamma="scale")
 
     svm = Pipeline([
         ("scaler", StandardScaler()),
-        ("svm", SVC(kernel="rbf", C=PARAMS["C"], gamma=PARAMS["gamma"], class_weight="balanced")),
+        ("svm", SVC(kernel="rbf", C=C, gamma=gamma, class_weight="balanced")),
     ])
     svm.fit(X_train, y_train)
     y_pred = svm.predict(X_test)
@@ -217,7 +228,7 @@ def run_single_split(data, test_idx, repeat, feature_cols, C=1.0, gamma="scale")
     return result, pred_df
 
 
-def run_repeated_cv(data, selected_test_splits, n_repeats=100, C=1.0, gamma="scale"):
+def run_repeated_cv(data, selected_test_splits, n_repeats=100, C=PARAMS["C"], gamma=PARAMS["gamma"]):
     """Loop the splits, collecting metrics and per-set predictions."""
     feature_cols = [c for c in data.columns if c not in META_COLS]
     results, all_predictions = [], []
@@ -266,8 +277,172 @@ def eval_over_splits(df, p, splits, cache=None, metric="balanced_accuracy"):
     return float(np.mean(scores)), float(np.std(scores))
 
 
+def run_single_split_rich(data, test_idx, repeat, feature_cols, C=PARAMS["C"],
+                          gamma=PARAMS["gamma"], perm_repeats=5,
+                          imp_metric="balanced_accuracy", rng=None):
+    rng = np.random.default_rng(0) if rng is None else rng
+    train_idx = data.index.difference(test_idx).to_numpy()
+    train_df_raw = data.loc[train_idx]
+    test_df_raw = data.loc[test_idx]
+
+    X_train, X_test = build_design_matrices(train_df_raw, test_df_raw, feature_cols)
+    y_train = train_df_raw[TARGET_COL]
+    y_test = test_df_raw[TARGET_COL]
+
+    svm = Pipeline([
+        ("scaler", StandardScaler()),
+        ("svm", SVC(kernel="rbf", C=C, gamma=gamma, class_weight="balanced")),
+    ])
+    svm.fit(X_train, y_train)
+    y_pred = svm.predict(X_test)
+
+    result = {
+        "repeat": repeat,
+        **score_predictions(y_test, y_pred),
+        "n_train": len(train_idx),
+        "n_test": len(test_idx),
+    }
+
+    pred_df = test_df_raw[META_COLS].copy()
+    pred_df["repeat"] = repeat
+    pred_df["pred"] = y_pred
+    pred_df["score"] = svm.decision_function(X_test)
+    pred_df["correct"] = pred_df["focus"] == pred_df["pred"]
+
+    pca_cols = [c for c in X_test.columns if "_pc" in c]
+    importance = pd.Series(0.0, index=pca_cols, dtype="float64")
+    if perm_repeats > 0 and len(pca_cols) > 0:
+        base = _METRIC_FNS[imp_metric](y_test, y_pred)
+        n_test = len(X_test)
+        for c in pca_cols:
+            drops = []
+            for _ in range(perm_repeats):
+                Xp = X_test.copy()
+                Xp[c] = X_test[c].to_numpy()[rng.permutation(n_test)]
+                yp = svm.predict(Xp)
+                drops.append(base - _METRIC_FNS[imp_metric](y_test, yp))
+            importance.loc[c] = float(np.mean(drops))
+
+    return result, pred_df, importance
+
+
+def evaluate_rich(data, params=None, selected_test_splits=None, n_repeats=None,
+                  perm_repeats=5, imp_metric="balanced_accuracy",
+                  output_dir="results/svm"):
+    """Full evaluation. Returns (results_df, predictions_df, importance_df).
+
+    results_df     : one row per split, all five metrics.
+    predictions_df : one row per (set, split) with meta cols, pred, score, correct.
+    importance_df  : one row per PCA component, mean/std permutation importance.
+    Set perm_repeats=0 to skip importance (faster).
+    All outputs are saved to output_dir/ as CSVs + PNG.
+    """
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+
+    p = dict(PARAMS)
+    if params is not None:
+        p.update(params)
+    data = data.reset_index(drop=True)
+    rng = np.random.default_rng(p.get("seed", 42))
+
+    if selected_test_splits is None:
+        selected_test_splits = get_splits(data, p.get("seed", 42))
+    if n_repeats is None:
+        n_repeats = p.get("n_repeats", len(selected_test_splits))
+    n_repeats = min(n_repeats, len(selected_test_splits))
+
+    feature_cols = [c for c in data.columns if c not in META_COLS]
+    results, all_predictions, imp_per_split = [], [], []
+
+    print(f"splits={n_repeats}  features={len(feature_cols)}  "
+          f"importance={'on' if perm_repeats else 'off'}")
+
+    for repeat in range(n_repeats):
+        if repeat % 50 == 0:
+            print(f"progress: {repeat / n_repeats * 100:.0f}%")
+        test_idx = selected_test_splits[repeat]
+        result, pred_df, imp = run_single_split_rich(
+            data, test_idx, repeat, feature_cols,
+            C=p.get("C", 1.0), gamma=p.get("gamma", "scale"),
+            perm_repeats=perm_repeats, imp_metric=imp_metric, rng=rng)
+        results.append(result)
+        all_predictions.append(pred_df)
+        imp_per_split.append(imp.rename(repeat))
+
+    results_df = pd.DataFrame(results)
+    predictions_df = pd.concat(all_predictions, ignore_index=True)
+
+    if len(imp_per_split) == 0 or len(imp_per_split[0]) == 0:
+        importance_df = pd.DataFrame(columns=["feature", "importance_mean",
+                                              "importance_std"])
+    else:
+        imp_mat = pd.DataFrame(imp_per_split)
+        importance_df = (pd.DataFrame({
+            "feature": imp_mat.columns,
+            "importance_mean": imp_mat.mean(axis=0).to_numpy(),
+            "importance_std": imp_mat.std(axis=0).to_numpy(),
+        }).sort_values("importance_mean", ascending=False).reset_index(drop=True))
+
+    # ---- save everything ----
+    results_df.to_csv(os.path.join(output_dir, "metrics.csv"), index=False)
+    predictions_df.to_csv(os.path.join(output_dir, "predictions.csv"), index=False)
+    importance_df.to_csv(os.path.join(output_dir, "importance.csv"), index=False)
+
+    summary = metrics_summary(results_df)
+    summary.to_csv(os.path.join(output_dir, "metrics_summary.csv"))
+
+    record_report = per_record_report(predictions_df)
+    record_report.to_csv(os.path.join(output_dir, "per_record_report.csv"))
+
+    plot_importance(importance_df, top=20,
+                    path=os.path.join(output_dir, "importance.png"))
+
+    print(f"\nall results saved to {output_dir}/")
+    return results_df, predictions_df, importance_df
+
+
+def metrics_summary(results_df):
+    summary = results_df[METRIC_COLS].describe()
+    print(summary.round(3))
+    print("\nmeans:", results_df[METRIC_COLS].mean().round(3).to_dict())
+    return summary
+
+
+def per_record_report(predictions_df):
+    report = (predictions_df
+              .groupby(META_COLS)
+              .agg(count=("correct", "count"),
+                   hit_rate=("correct", "mean"),
+                   mean_score=("score", "mean"))
+              .sort_values("hit_rate"))
+    print(report.round(3))
+    return report
+
+
+def plot_importance(importance_df, top=20, path=None):
+
+    import matplotlib
+    if path is not None:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    d = importance_df.head(top).iloc[::-1]   # most important at top
+    fig, ax = plt.subplots(figsize=(6, max(3, 0.35 * len(d))))
+    ax.barh(d["feature"], d["importance_mean"], xerr=d["importance_std"],
+            color="#4C72B0", ecolor="#999", capsize=3)
+    ax.axvline(0, color="k", lw=0.8)
+    ax.set_xlabel("Permutation importance")
+    # ax.set_title(f"SVM PCA importance (top {min(top, len(importance_df))})")
+    fig.tight_layout()
+    if path:
+        fig.savefig(path, dpi=130)
+        print("saved", path)
+    return fig
+
+
 if __name__ == "__main__":
     data = prepare_svm_df(pd.read_csv('data/df_processed.csv'))
-    selected_test_splits = get_splits(data)
-    results_df, predictions_df = run_repeated_cv(data, selected_test_splits, n_repeats=1296)
-    summarize(results_df, predictions_df)
+    results_df, predictions_df, importance_df = evaluate_rich(
+        data, perm_repeats=5, output_dir="results/svm/new_run"
+    )

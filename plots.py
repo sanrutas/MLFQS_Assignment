@@ -1,5 +1,6 @@
 from matplotlib import pyplot as plt
 import numpy as np
+import pandas as pd
 
 def plot_3d_outliers(df, name, mask_col, cols=("acc_lin_x", "acc_lin_y", "acc_lin_z")):
     x_col, y_col, z_col = cols
@@ -73,3 +74,33 @@ def plot_xyz_outliers_over_time(df, name, mask_col):
 
     plt.tight_layout()
     plt.savefig(f"plots/{mask_col}_plot_ts")
+
+
+def plot_importance(importance_df, top=20, path=None):
+
+    import matplotlib
+    if path is not None:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    d = importance_df.head(top).iloc[::-1]   # most important at top
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.barh(d["feature"], d["importance_mean"], xerr=d["importance_std"],
+            color="#4C72B0", ecolor="#999", capsize=3)
+    ax.axvline(0, color="k", lw=0.8)
+    ax.set_xlabel("Permutation importance")
+    # ax.set_title(f"SVM PCA importance (top {min(top, len(importance_df))})")
+    fig.tight_layout()
+    if path:
+        fig.savefig(path, dpi=130)
+        print("saved", path)
+    return fig
+
+
+
+if __name__ == "__main__":
+    # svm_importance = pd.read_csv('results/svm/importance.csv')
+    # plot_importance(svm_importance, path='results/svm/SVM_importances')
+
+    svm_importance = pd.read_csv('results/lstm/tuned_run1/importance.csv')
+    plot_importance(svm_importance, path='results/lstm/tuned_run1/LSTM_importances')
